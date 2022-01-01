@@ -8,7 +8,17 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"sort"
 )
+
+func findNull(bytes []byte) int {
+	for i, val := range bytes {
+		if val == 0 {
+			return i
+		}
+	}
+	return len(bytes)
+}
 
 // Usage: your_git.sh run <image> <command> <arg1> <arg2> ...
 func main() {
@@ -32,13 +42,7 @@ func main() {
 			if reader, err := zlib.NewReader(file); err == nil {
 				if data, err := io.ReadAll(reader); err == nil {
 					// blob {size}\0{content}
-					idx := 0
-					for i, val := range data {
-						if val == 0 {
-							idx = i
-							break
-						}
-					}
+					idx := findNull(data)
 
 					os.Stdout.Write(data[idx+1:])
 				}
@@ -74,6 +78,46 @@ func main() {
 			}
 
 			fmt.Printf("%x", hash)
+		}
+
+	case "ls-tree":
+		sha := os.Args[3]
+
+		if file, err := os.Open(fmt.Sprintf(".git/objects/%s/%s", sha[:2], sha[2:])); err == nil {
+			if reader, err := zlib.NewReader(file); err == nil {
+				if data, err := io.ReadAll(reader); err == nil {
+					idx := findNull(data)
+					data = data[idx+1:]
+
+					readEntry := func(data []byte) ([]byte, string) {
+						idx := findNull(data)
+
+						entry := string(data[:idx])
+
+						for i, ch := range entry {
+							if ch == ' ' {
+								entry = entry[i+1:]
+								break
+							}
+						}
+
+						return data[idx+21:], entry
+					}
+
+					entries := []string{}
+					for len(data) != 0 {
+						var entry string
+						data, entry = readEntry(data)
+						entries = append(entries, entry)
+					}
+
+					sort.Strings(entries)
+
+					for _, entry := range entries {
+						fmt.Println(entry)
+					}
+				}
+			}
 		}
 
 	default:
