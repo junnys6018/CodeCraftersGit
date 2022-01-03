@@ -13,7 +13,7 @@ func CommitTree(treeSha, commitSha, message string) [20]byte {
 	fmt.Fprintf(&blob, "parent %s\n", commitSha)
 	fmt.Fprint(&blob, "author Jun Lim <jun@gmail.com> 1243040974 -0700\n")
 	fmt.Fprint(&blob, "committer Jun Lim <jun@gmail.com> 1243040974 -0700\n\n")
-	fmt.Fprint(&blob, message)
+	fmt.Fprintf(&blob, "%s\n", message)
 
 	newBlob := bytes.Buffer{}
 
