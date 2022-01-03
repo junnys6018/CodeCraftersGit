@@ -1,5 +1,5 @@
 package main
 
-func WriteTree() {
-
+func WriteTree(path string) string {
+	return ""
 }

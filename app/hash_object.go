@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-func HashObject(path string) {
+func HashObject(path string) string {
 	if data, err := os.ReadFile(path); err == nil {
 		blob := bytes.Buffer{}
 
@@ -34,6 +34,7 @@ func HashObject(path string) {
 			fmt.Println(err)
 		}
 
-		fmt.Printf("%x", hash)
+		return fmt.Sprintf("%x", hash)
 	}
+	return ""
 }
