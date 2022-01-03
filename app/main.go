@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/zlib"
 	"fmt"
 	"os"
 )
@@ -14,8 +16,26 @@ func findNull(bytes []byte) int {
 	return len(bytes)
 }
 
+func WriteObject(hash [20]byte, blob bytes.Buffer) {
+	err := os.MkdirAll(fmt.Sprintf(".git/objects/%x/", hash[:1]), 0755)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	compressed := bytes.Buffer{}
+	writer := zlib.NewWriter(&compressed)
+	writer.Write(blob.Bytes())
+	writer.Close()
+
+	err = os.WriteFile(fmt.Sprintf(".git/objects/%x/%x", hash[:1], hash[1:]), compressed.Bytes(), 0644)
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
 // Usage: your_git.sh run <image> <command> <arg1> <arg2> ...
 // Assumes command is run in the root of the git repo... not hard to fix but cbf
+// Only implements the happy path, does not handle io errors etc...
 func main() {
 	switch command := os.Args[1]; command {
 	case "init":
@@ -35,6 +55,12 @@ func main() {
 
 	case "write-tree":
 		fmt.Printf("%x\n", WriteTree("."))
+
+	case "commit-tree":
+		treeSha := os.Args[2]
+		commitSha := os.Args[4]
+		message := os.Args[6]
+		fmt.Printf("%x\n", CommitTree(treeSha, commitSha, message))
 
 	default:
 		fmt.Printf("Unknown command %s\n", command)
