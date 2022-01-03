@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-func HashObject(path string) string {
+func HashObject(path string) [20]byte {
 	if data, err := os.ReadFile(path); err == nil {
 		blob := bytes.Buffer{}
 
@@ -19,7 +19,7 @@ func HashObject(path string) string {
 		hash := sha1.Sum(blob.Bytes())
 
 		// Write to disk
-		err := os.Mkdir(fmt.Sprintf(".git/objects/%x/", hash[:1]), 0755)
+		err := os.MkdirAll(fmt.Sprintf(".git/objects/%x/", hash[:1]), 0755)
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -34,7 +34,7 @@ func HashObject(path string) string {
 			fmt.Println(err)
 		}
 
-		return fmt.Sprintf("%x", hash)
+		return hash
 	}
-	return ""
+	return [20]byte{}
 }

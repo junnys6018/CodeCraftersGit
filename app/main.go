@@ -27,14 +27,14 @@ func main() {
 
 	case "hash-object":
 		path := os.Args[3]
-		fmt.Println(HashObject(path))
+		fmt.Printf("%x\n", HashObject(path))
 
 	case "ls-tree":
 		sha := os.Args[3]
 		LsTree(sha)
 
 	case "write-tree":
-		fmt.Println(WriteTree("."))
+		fmt.Printf("%x\n", WriteTree("."))
 
 	default:
 		fmt.Printf("Unknown command %s\n", command)
