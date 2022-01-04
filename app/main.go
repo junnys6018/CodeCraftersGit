@@ -62,6 +62,11 @@ func main() {
 		message := os.Args[6]
 		fmt.Printf("%x\n", CommitTree(treeSha, commitSha, message))
 
+	case "clone":
+		url := os.Args[2]
+		dir := os.Args[3]
+		Clone(url, dir)
+
 	default:
 		fmt.Printf("Unknown command %s\n", command)
 		os.Exit(1)
