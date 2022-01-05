@@ -16,10 +16,10 @@ func findNull(bytes []byte) int {
 	return len(bytes)
 }
 
-func WriteObject(hash [20]byte, blob bytes.Buffer) {
+func WriteObject(hash [20]byte, blob bytes.Buffer) error {
 	err := os.MkdirAll(fmt.Sprintf(".git/objects/%x/", hash[:1]), 0755)
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
 
 	compressed := bytes.Buffer{}
@@ -29,8 +29,9 @@ func WriteObject(hash [20]byte, blob bytes.Buffer) {
 
 	err = os.WriteFile(fmt.Sprintf(".git/objects/%x/%x", hash[:1], hash[1:]), compressed.Bytes(), 0644)
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
+	return nil
 }
 
 // Usage: your_git.sh run <image> <command> <arg1> <arg2> ...
@@ -63,9 +64,9 @@ func main() {
 		fmt.Printf("%x\n", CommitTree(treeSha, commitSha, message))
 
 	case "clone":
-		url := os.Args[2]
+		cloneUrl := os.Args[2]
 		dir := os.Args[3]
-		Clone(url, dir)
+		Clone(cloneUrl, dir)
 
 	default:
 		fmt.Printf("Unknown command %s\n", command)
