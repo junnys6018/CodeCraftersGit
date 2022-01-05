@@ -65,10 +65,10 @@ func getObjectName(pktLines [][]byte) (string, error) {
 	return "", errors.New("Invalid pktLines")
 }
 
-func getPackfile(cloneUrl string) ([]byte, error) {
+func getPackfile(cloneUrl string) ([]byte, string, error) {
 	response, err := http.Get(fmt.Sprintf("%s/info/refs?service=git-upload-pack", cloneUrl))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	discoveryBuffer := bytes.Buffer{}
@@ -80,7 +80,7 @@ func getPackfile(cloneUrl string) ([]byte, error) {
 	for len(discovery) > 0 {
 		n, data, err := readPktLine(discovery)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 
 		discovery = discovery[n:]
@@ -90,13 +90,13 @@ func getPackfile(cloneUrl string) ([]byte, error) {
 
 	objectName, err := getObjectName(pktLines)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	buffer := bytes.NewBufferString(fmt.Sprintf("0032want %s\n00000009done\n", objectName))
 	response, err = http.Post(fmt.Sprintf("%s/git-upload-pack", cloneUrl), "application/x-git-upload-pack-request", buffer)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	packfileBuffer := bytes.Buffer{}
@@ -104,11 +104,11 @@ func getPackfile(cloneUrl string) ([]byte, error) {
 	packfile := packfileBuffer.Bytes()
 	n, _, err := readPktLine(packfile) // read 0008NAK
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	packfile = packfile[n:]
-	return packfile, nil
+	return packfile, objectName, nil
 }
 
 type ObjectType int
@@ -122,7 +122,7 @@ const (
 	OBJ_REF_DELTA            = 7
 )
 
-func writeObjectWithType(object []byte, objectType string) error {
+func writeObjectWithType(object []byte, objectType string) ([20]byte, error) {
 	blob := bytes.Buffer{}
 
 	fmt.Fprintf(&blob, "%s %d", objectType, len(object))
@@ -133,7 +133,7 @@ func writeObjectWithType(object []byte, objectType string) error {
 
 	// Write to disk
 	err := WriteObject(hash, blob)
-	return err
+	return hash, err
 }
 
 func readObjectHeader(packfile []byte) (size uint64, objectType ObjectType, used int, err error) {
@@ -185,6 +185,7 @@ func readObject(packfile []byte) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	defer r.Close()
 
 	object, err := io.ReadAll(r)
 	if err != nil {
@@ -195,49 +196,64 @@ func readObject(packfile []byte) (int, []byte, error) {
 	return bytesRead, object, nil
 }
 
-func writePackfile(packfile []byte, dir string) error {
-	head := packfile[:len(packfile)-20]
+type DeltaObject struct {
+	baseObject string
+	data       []byte
+}
 
-	// verify packfile
+func verifyPackfile(packfile []byte) error {
 	if len(packfile) < 32 {
 		return errors.New("Bad packfile")
 	}
 
 	checksum := packfile[len(packfile)-20:]
-	expected := sha1.Sum(packfile[:len(packfile)-20])
+	packfile = packfile[:len(packfile)-20]
+	expected := sha1.Sum(packfile)
+
 	if bytes.Compare(checksum, expected[:]) != 0 {
 		return errors.New("Invalid packfile checksum")
 	}
 
-	if bytes.Compare(head[:4], []byte("PACK")) != 0 {
+	if bytes.Compare(packfile[0:4], []byte("PACK")) != 0 {
 		return errors.New("Invalid packfile header")
 	}
-	head = head[4:]
 
-	version := readUint32BigEndian(head)
-	head = head[4:]
+	version := readUint32BigEndian(packfile[4:8])
 
 	if version != 2 && version != 3 {
 		return errors.New("Invalid packfile version")
 	}
 
-	numObjects := readUint32BigEndian(head)
-	head = head[4:]
+	return nil
+}
 
+func writePackfile(packfile []byte, dir string) error {
+	err := verifyPackfile(packfile)
+	if err != nil {
+		return err
+	}
+
+	used := 8
+	numObjects := readUint32BigEndian(packfile[used:])
+	used += 4
+
+	deltaObjects := []DeltaObject{}
 	var objectsRead uint32
-	for len(head) > 0 {
+	packfile = packfile[:len(packfile)-20]
+
+	for used < len(packfile) {
 		objectsRead++
 
-		size, objectType, used, err := readObjectHeader(head)
-		head = head[used:]
+		size, objectType, read, err := readObjectHeader(packfile[used:])
+		used += read
 
 		if err != nil {
 			return err
 		}
 
-		switch objectType {
-		case OBJ_COMMIT:
-			read, object, err := readObject(head)
+		if objectType == OBJ_COMMIT || objectType == OBJ_TREE || objectType == OBJ_BLOB || objectType == OBJ_TAG {
+			read, object, err := readObject(packfile[used:])
+			used += read
 			if err != nil {
 				return err
 			}
@@ -246,32 +262,27 @@ func writePackfile(packfile []byte, dir string) error {
 				return errors.New("Bad object header length")
 			}
 
-			head = head[read:]
+			objectTypeStr := map[ObjectType]string{
+				OBJ_COMMIT: "commit",
+				OBJ_TREE:   "tree",
+				OBJ_BLOB:   "blob",
+				OBJ_TAG:    "tag",
+			}[objectType]
 
-			err = writeObjectWithType(object, "commit")
+			_, err = writeObjectWithType(object, objectTypeStr)
+
+			if err != nil {
+				return err
+			}
+		} else if objectType == OBJ_OFS_DELTA /* TODO */ {
+			_, read, err := readSize(packfile[used:])
+			used += read
 			if err != nil {
 				return err
 			}
 
-		case OBJ_TREE:
-			read, object, err := readObject(head)
-			if err != nil {
-				return err
-			}
-
-			if int(size) != len(object) {
-				return errors.New("Bad object header length")
-			}
-
-			head = head[read:]
-
-			err = writeObjectWithType(object, "tree")
-			if err != nil {
-				return err
-			}
-
-		case OBJ_BLOB:
-			read, object, err := readObject(head)
+			read, object, err := readObject(packfile[used:])
+			used += read
 			if err != nil {
 				return err
 			}
@@ -280,39 +291,15 @@ func writePackfile(packfile []byte, dir string) error {
 				return errors.New("Bad object header length")
 			}
 
-			head = head[read:]
+			return errors.New("cant handle ofsdelta object")
 
-			err = writeObjectWithType(object, "blob")
-			if err != nil {
-				return err
-			}
+		} else if objectType == OBJ_REF_DELTA {
+			hash := packfile[used : used+20]
+			used += 20
 
-		case OBJ_TAG:
-			read, object, err := readObject(head)
-			if err != nil {
-				return err
-			}
+			read, object, err := readObject(packfile[used:])
+			used += read
 
-			if int(size) != len(object) {
-				return errors.New("Bad object header length")
-			}
-
-			head = head[read:]
-
-			err = writeObjectWithType(object, "tag")
-			if err != nil {
-				return err
-			}
-
-		case OBJ_OFS_DELTA:
-			// read offset
-			_, used, err := readSize(head)
-			if err != nil {
-				return err
-			}
-			head = head[used:]
-
-			read, object, err := readObject(head)
 			if err != nil {
 				return err
 			}
@@ -321,29 +308,205 @@ func writePackfile(packfile []byte, dir string) error {
 				return errors.New("Bad object header length")
 			}
 
-			head = head[read:]
+			deltaObjects = append(deltaObjects, DeltaObject{baseObject: hex.EncodeToString(hash), data: object})
 
-		case OBJ_REF_DELTA:
-			fmt.Println("refdelta")
-
-			// hash := head[:20]
-			head = head[20:]
-			read, object, err := readObject(head)
-			if err != nil {
-				return err
-			}
-
-			if int(size) != len(object) {
-				return errors.New("Bad object header length")
-			}
-
-			head = head[read:]
-
+		} else {
+			return errors.New("Invalid object type")
 		}
 	}
 
 	if numObjects != objectsRead {
 		return errors.New("Bad object count")
+	}
+
+	for len(deltaObjects) > 0 {
+		unaddedDeltaObjects := []DeltaObject{}
+		added := false
+
+		for _, delta := range deltaObjects {
+			if objectExists(delta.baseObject) {
+				added = true
+				baseObject, objectType, err := openObject(delta.baseObject)
+				if err != nil {
+					return err
+				}
+
+				err = writeDeltaObject(baseObject, delta.data, objectType)
+				if err != nil {
+					return err
+				}
+
+			} else {
+				unaddedDeltaObjects = append(unaddedDeltaObjects, delta)
+			}
+		}
+
+		if !added {
+			return errors.New("Bad delta objects")
+		}
+
+		deltaObjects = unaddedDeltaObjects
+	}
+
+	return nil
+}
+
+func writeDeltaObject(baseObject, deltaObject []byte, objectType string) error {
+	used := 0
+	baseSize, read, err := readSize(deltaObject[used:])
+	if err != nil {
+		return err
+	}
+	used += read
+
+	if len(baseObject) != int(baseSize) {
+		return errors.New("Bad delta header")
+	}
+
+	expectedSize, read, err := readSize(deltaObject[used:])
+	if err != nil {
+		return err
+	}
+	used += read
+
+	buffer := bytes.Buffer{}
+
+	for used < len(deltaObject) {
+		opcode := deltaObject[used]
+		used++
+
+		if opcode&0x80 != 0 {
+			var argument uint64
+
+			for bit := 0; bit < 7; bit++ {
+				if opcode&(1<<bit) != 0 {
+					argument += uint64(deltaObject[used]) << (bit * 8)
+					used++
+				}
+			}
+
+			offset := argument & 0xFFFFFFFF
+			size := (argument >> 32) & 0xFFFFFF
+
+			if size == 0 {
+				size = 0x10000
+			}
+
+			buffer.Write(baseObject[offset : offset+size])
+
+		} else {
+			size := int(opcode & 0x7F)
+			buffer.Write(deltaObject[used : used+size])
+			used += size
+		}
+	}
+
+	undeltifiedObject := buffer.Bytes()
+
+	if int(expectedSize) != len(undeltifiedObject) {
+		return errors.New("Bad delta header")
+	}
+
+	_, err = writeObjectWithType(undeltifiedObject, objectType)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func objectExists(hash string) bool {
+	path := fmt.Sprintf(".git/objects/%s/%s", hash[:2], hash[2:])
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return true
+}
+
+func openObject(objectName string) ([]byte, string, error) {
+	file, err := os.Open(fmt.Sprintf(".git/objects/%s/%s", objectName[:2], objectName[2:]))
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+
+	reader, err := zlib.NewReader(file)
+	if err != nil {
+		return nil, "", err
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", err
+	}
+
+	idx := findNull(data)
+	var (
+		objectType string
+		size       int
+	)
+	fmt.Sscanf(string(data[:idx]), "%s %d", &objectType, &size)
+
+	if idx+size+1 != len(data) {
+		return nil, "", errors.New("Bad object size")
+	}
+
+	return data[idx+1:], objectType, nil
+}
+
+func checkoutCommit(commitHash string) error {
+	commit, objectType, err := openObject(commitHash)
+	if err != nil {
+		return err
+	}
+
+	if objectType != "commit" {
+		return errors.New("Object not a commit")
+	}
+	treeHash := commit[5:45]
+
+	err = checkoutTree(string(treeHash), ".")
+	return err
+}
+
+func checkoutTree(treeHash, dir string) error {
+	os.MkdirAll(dir, 0755)
+
+	tree, objectType, err := openObject(treeHash)
+	if err != nil {
+		return err
+	}
+
+	if objectType != "tree" {
+		return errors.New("Object not a tree")
+	}
+
+	for len(tree) > 0 {
+		used, mode, name, hash := readTreeEntry(tree)
+		tree = tree[used:]
+
+		hashStr := hex.EncodeToString(hash[:])
+		fullPath := fmt.Sprintf("%s/%s", dir, name)
+
+		if mode == "40000" /* directory */ {
+			err = checkoutTree(hashStr, fullPath)
+			if err != nil {
+				return err
+			}
+		} else if mode == "100644" || mode == "100755" /* file */ {
+			blob, objectType, err := openObject(hashStr)
+			if err != nil {
+				return err
+			}
+
+			if objectType != "blob" {
+				return errors.New("Object not a blob")
+			}
+
+			os.WriteFile(fullPath, blob, 0644) // currently ignoring mode
+		}
 	}
 
 	return nil
@@ -362,11 +525,16 @@ func Clone(cloneUrl, dir string) {
 
 	Init()
 
-	packfile, err := getPackfile(cloneUrl)
+	packfile, commit, err := getPackfile(cloneUrl)
 	if err != nil {
 		panic(err)
 	}
 	err = writePackfile(packfile, dir)
+	if err != nil {
+		panic(err)
+	}
+
+	err = checkoutCommit(commit)
 	if err != nil {
 		panic(err)
 	}
